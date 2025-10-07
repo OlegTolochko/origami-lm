@@ -40,7 +40,7 @@ class MultiHeadLatentAttention(nn.Module):
         self.register_buffer("kv_cache")
         self.register_buffer("kv_rope_cache")
 
-    def forward(self, x: torch.Tensor, start_pos: int):
+    def forward(self, x: torch.Tensor, start_pos: int, mask: torch.Tensor):
         kv_c = self.dkv(x[start_pos:])  # (B, seq_len, d_compressed)
         kv_c_main, kv_c_rope = torch.split(
             q_c, [self.d_model - self.d_compressed, self.d_compressed], -1
@@ -64,7 +64,8 @@ class MultiHeadLatentAttention(nn.Module):
         q_k_c = q_c_main @ self.uk
         q_k_c_head = torch.reshape(q_k_c, (-1, -1, self.n_head, self.head_dim))
         kv_c_head = torch.reshape(kv_c, (-1, -1, self.n_head, self.head_dim))
-        att_scores = q_k_c_head @ torch.transpose(kv_c_head)
+        att_scores = q_k_c_head @ torch.transpose(kv_c_head) + q_c_rope @ torch.transpose(kv_c_rope)
+        att_scores += mask
 
 
 
