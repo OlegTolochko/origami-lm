@@ -2,6 +2,7 @@
 import torch
 import torch.nn as nn
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -36,22 +37,25 @@ class MultiHeadLatentAttention(nn.Module):
         self.uk = nn.Embedding(args.d_compressed, args.d_model)
         self.uq = nn.Embedding()
 
+        self.kv_norm = nn.RMSNorm() #TODO: Finish normalization setup
+
         # TODO: finish kv cache setup
         self.register_buffer("kv_cache")
         self.register_buffer("kv_rope_cache")
 
-    def forward(self, x: torch.Tensor, start_pos: int, mask: torch.Tensor):
+    def forward(self, x: torch.Tensor, start_pos: int, mask: Optional[torch.Tensor]):
+        _, seq_len, _ = x.shape
         kv_c = self.dkv(x[start_pos:])  # (B, seq_len, d_compressed)
         kv_c_main, kv_c_rope = torch.split(
             q_c, [self.d_model - self.d_compressed, self.d_compressed], -1
         )
-
-        _, seq_len, _ = x.shape
+        self.kv_cache[:, start_pos:seq_len] = self.kv_norm(kv_c)
+ 
         rope_position_list = list(range(start_pos, seq_len))
         q_c = self.dq(x[start_pos:])
         q_c_main, q_c_rope = torch.split(
             q_c, [self.d_model - self.d_compressed, self.d_compressed], -1
-        )
+        ) 
         q_c_rope = apply_rotary_emb(q_c_rope, rope_position_list)
 
         kv_c_cached = self.kv_cache[:start_pos]
@@ -61,13 +65,15 @@ class MultiHeadLatentAttention(nn.Module):
         kv_c_rope_cached = self.kv_rope_cache[:start_pos]
         kv_c_rope = torch.concat(kv_c_rope_new, kv_c_rope_cached)
 
+        self.kv_rope_cache[:, start_pos:seq_len] = kv_c_rope_new
+
         q_k_c = q_c_main @ self.uk
-        q_k_c_head = torch.reshape(q_k_c, (-1, -1, self.n_head, self.head_dim))
+        q_k_c_head = torch.reshape(q_k_c, (-1, -1, self.n_head, self.head_dim)) # (B, seq_len, n_head, head_dim), TODO: kv splitting
         kv_c_head = torch.reshape(kv_c, (-1, -1, self.n_head, self.head_dim))
-        att_scores = q_k_c_head @ torch.transpose(kv_c_head) + q_c_rope @ torch.transpose(kv_c_rope)
+        att_scores = q_k_c_head @ torch.transpose(kv_c_head) + q_c_rope @ torch.transpose(kv_c_rope) # TODO: fix, utilize einsum
         att_scores += mask
 
 
 
 args = ModelArgs()
-MultiHeadLatentAttention(args=args)
+attention = MultiHeadLatentAttention(args=args)
