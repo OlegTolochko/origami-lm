@@ -13,6 +13,8 @@ class ModelArgs:
     nope_head_dim = 48
     q_d_compressed = 128
     d_rope = 16
+    max_batch_size = 8
+    max_seq_len = 2048
 
 
 def apply_rotary_emb(x, position, args: ModelArgs):
@@ -36,22 +38,26 @@ class MultiHeadLatentAttention(nn.Module):
         self.q_d_compressed = args.q_d_compressed
         self.d_rope = args.d_rope
 
-        self.dkv = nn.Parameter(torch.zeros(args.d_model, args.kv_d_compressed + self.d_rope)) # Compressed key/value downprojection
-        self.dq = nn.Parameter(torch.zeros(args.d_model, args.q_d_compressed)) # Compressed Query downprojection
+        self.dkv = nn.Linear(args.d_model, args.kv_d_compressed + self.d_rope) # Compressed key/value downprojection
+        self.dq = nn.Linear(args.d_model, args.q_d_compressed) # Compressed Query downprojection
 
-        self.ukv = nn.Parameter(torch.zeros(self.n_head, self.nope_head_dim*2, self.kv_d_compressed)) # projection to headwise key/value representations
-        self.uq = nn.Parameter(torch.zeros(args.q_d_compressed, self.nope_head_dim * self.n_head)) # TODO: Correct head dim used here?
+        self.uk = nn.Linear(torch.zeros(self.n_head, self.nope_head_dim, self.kv_d_compressed)) # projection of compressed kv's to headwise key representations
+        self.uk = nn.Sequential(
+            nn.Linear(self.n_head*(self.nope_head_dim + self.kv_d_compressed)),
+        )
+        self.uv = nn.Parameter(torch.zeros(self.n_head, self.nope_head_dim, self.kv_d_compressed)) # projection of compressed kv's to headwise vaule representation
 
-        self.kv_norm = nn.RMSNorm() # TODO: Finish normalization setup
-        self.q_norm = nn.RMSNorm()
+        self.uq = nn.Parameter(torch.zeros(args.q_d_compressed, self.nope_head_dim * self.n_head))
+
+        self.kv_norm = nn.RMSNorm(self.kv_d_compressed)
+        self.q_norm = nn.RMSNorm(self.q_d_compressed)
 
         self.wo = nn.Parameter(torch.zeros(self.n_head*self.nope_head_dim, self.d_model)) # Final out projection back to d_model
 
-        # TODO: finish kv cache setup
-        self.register_buffer("kv_cache")
-        self.register_buffer("kv_rope_cache")
+        self.register_buffer("kv_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.kv_d_compressed))
+        self.register_buffer("kv_rope_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.q_d_compressed))
 
-    def forward(self, x: torch.Tensor, start_pos: int, mask: Optional[torch.Tensor]):
+    def forward(self, x: torch.Tensor, start_pos: int, mask: torch.Tensor = None):
         _, seq_len, _ = x.shape
         
         # Compressed Key/Value flow, (Important: kv caching/calculation is not performed head-wise):
@@ -82,12 +88,19 @@ class MultiHeadLatentAttention(nn.Module):
         q_head_rope = apply_rotary_emb(q_head_rope, rope_position_list) # apply rotatonal positional embedding 
 
         # Actual Attention Calculation:
-        q_k_c = q_head_nope @ self.ukv
-        q_k_c_head = torch.reshape(q_k_c, (-1, -1, self.n_head, self.head_dim)) # (B, seq_len, n_head, head_dim), TODO: kv splitting
-        kv_c_head = torch.reshape(kv_c, (-1, -1, self.n_head, self.head_dim))
-        att_scores = q_k_c_head @ torch.transpose(kv_c_head) + q_head_rope @ torch.transpose(kv_c_rope) # TODO: fix, utilize einsum
+        # Linear Algebra Trick: a @ (b @ c) = (a @ b) @ c, key up-projection step can be "skipped"
+        q_nope_proj = torch.einsum("bshd,hdc->bshc", q_head_nope, self.uk) # (B, seq_len', n_head, kv_d_compressed)
+
+        # s represents seq_len' which is the amount of queries, t is the amount kv pairs we want to attend to
+        att_nope_scores = torch.einsum("bshc,btc->bsht", q_nope_proj, kv_c) # calculate head-wise attention scores 
+        att_rope_scores = torch.einsum("bshc,btc->bsht", q_head_rope, kv_c_rope) # calculate positional embedding attention scores
+        att_scores = att_nope_scores + att_rope_scores
         att_scores += mask
 
+        # calculate head-wise values
+        values = self.uv(kv_c)
+        head_wise_weighted_values = att_nope_scores @ values
+        weighted_values = head_wise_weighted_values.squeeze(-2)
 
 
 args = ModelArgs()
