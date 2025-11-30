@@ -70,11 +70,11 @@ class MultiHeadLatentAttention(nn.Module):
         kv_c = torch.concat((kv_c_cached, kv_c_nope), dim=1) # join newly calculated key/value representations with cached ones (B, seq_len, kv_d_compressed)
 
         rope_position_list = torch.Tensor(list(range(start_pos, seq_len))) # Positions for positional embedding calcualtion
-        kv_c_rope_new = apply_rotary_emb(kv_c_rope, rope_position_list) # apply positional embedding to new 
-        kv_c_rope_cached = self.kv_rope_cache[:, :start_pos]
-        kv_c_rope = torch.concat((kv_c_rope_cached, kv_c_rope_new), dim=1) # (B, seq_len, d_rope)
+        kv_c_rope_new = apply_rotary_emb(kv_c_rope, rope_position_list) # apply positional embedding to new  
 
         self.kv_rope_cache[:, start_pos:seq_len] = kv_c_rope_new # cache key/value positional embedding
+        kv_c_rope_cached = self.kv_rope_cache[:, :start_pos]
+        kv_c_rope = torch.concat((kv_c_rope_cached, kv_c_rope_new), dim=1) # (B, seq_len, d_rope)
 
         # Query Flow:
         q_c = self.dq(x[start_pos:]) # (B, seq_len', n_heads), Queries only needed for non-processed tokens
@@ -98,6 +98,7 @@ class MultiHeadLatentAttention(nn.Module):
             att_scores += mask
 
         # calculate head-wise values
+        values = torch.einsum("", kv_c, self.uv)
         values = self.uv(kv_c) # TODO
         head_wise_weighted_values = att_nope_scores @ values
         weighted_values = head_wise_weighted_values.squeeze(-2)
